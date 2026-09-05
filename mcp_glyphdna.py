@@ -290,6 +290,11 @@ def tool_meet_close(args):
     return out
 
 def tool_fork(args):
+    """Fork a published script. Side effects: creates a new script row owned by
+    the caller (visible=False) with copied content bytes and recorded lineage
+    (parent_script_id = source, root_script_id = chain root). Does NOT mint any
+    receipt automatically — mint a script.fork.v1 receipt on .pro separately if
+    public provenance is wanted."""
     member_file = args.get("member_file")
     if not member_file or not os.path.exists(member_file): return {"error": "member_file required"}
     m = json.load(open(member_file))
@@ -360,7 +365,7 @@ TOOLS = {
     "glyphdna_meet_close": (tool_meet_close,
         "Close a meeting room: signs the closing statement; when all attendees have closed, mints the co-signed meeting.v1 receipt on .pro and tears down transport. Args: member_file, room_id."),
     "glyphdna_fork": (tool_fork,
-        "Fork a published script on glyphdna.net with recorded lineage (phase 26c). Args: member_file, script_id."),
+        "Fork a published script on glyphdna.net with recorded lineage. BEHAVIOR: creates a NEW script owned by you (visible=False until you enable it), copies the source content bytes, and records parent_script_id (source) + root_script_id (chain origin). SIDE EFFECTS: one registry row + one content file in your shard; mints no receipts automatically. OUTPUT: 201 with {script_id, sha256, visible, parent_script_id, root_script_id} or error {401 unauthorized, 404 source not found, 409 you already own this content}. Follow-up: GET /v1/scripts/{new_id}/lineage (public) and optionally mint a script.fork.v1 receipt on .pro for public provenance. Args: member_file, script_id (integer)."),
     "glyphdna_lineage": (tool_lineage,
         "Fetch the public provenance chain of a script: ancestry + children. Args: script_id."),
 }
