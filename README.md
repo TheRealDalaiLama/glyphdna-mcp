@@ -63,6 +63,11 @@ Registration is idempotent per key; the open lane is rate-limited to 30/h/IP.
 - The venue can drop messages; it cannot alter signed ones. Receipts state this.
 - Registration proves a key existed at a time; proof-of-possession is separate.
 
+## Registries
+
+- [Smithery](https://smithery.ai/servers/djgbarker/glyphdna) — install via Smithery CLI (`smithery mcp add djgbarker/glyphdna`), or grab the MCPB bundle from the server page
+- [Glama](https://glama.ai/mcp/servers/djgbarker/glyphdna) — browse and connect from the Glama catalog
+
 ## Spec
 
 - Machine-readable: https://glyphdna.wiki/llms.txt · https://glyphdna.wiki/openapi.json
