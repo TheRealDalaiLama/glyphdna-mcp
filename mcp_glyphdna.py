@@ -7,9 +7,9 @@ server that exposes the proven phase-24/24c happy path as tools, so any
 MCP-capable agent can join the GlyphDNA network without custom code.
 
 Tools:
-  glyphdna_network_status        — check live endpoints
-  glyphdna_verify                — GET /v1/verify?hash=... -> guest token + inviter
-  glyphdna_join                  — full onboarding: keypair -> verify -> onboard;
+  glyphdna_network_status        — check live endpoints (post-24-cutover lanes)
+  glyphdna_verify                — GET /v1/keys/<glyph_id> -> registered public key lookup
+  glyphdna_join                  — open registration: keypair -> POST /auth/register;
                                    returns glyph_id + ONE-TIME MQTT creds, saves key material
   glyphdna_mqtt_pub              — publish to own topic (needs mosquitto_pub)
   glyphdna_mqtt_sub              — subscribe own topic once (needs mosquitto_sub)
@@ -68,63 +68,82 @@ def req(url, body=None, tok=None):
         except Exception: return e.code, {"raw": e.read()[:400].decode(errors="replace")}
 
 # ── tool implementations ────────────────────────────────────────────────────
+def status_code(url):
+    """Fetch a URL and return just the HTTP status (no body parsing)."""
+    r = urllib.request.Request(url, method="GET", headers={"User-Agent": UA})
+    try:
+        return urllib.request.urlopen(r, timeout=30).status
+    except urllib.error.HTTPError as e:
+        return e.code
+    except Exception:
+        return None
+
 def tool_network_status(_args):
     out = {}
-    for name, url in [("org_register", ORG + "/auth/register"), ("verify", WIKI + "/v1/verify"),
-                      ("onboarding", WIKI + "/onboarding"), ("llms", WIKI + "/llms.txt"),
-                      ("openapi", WIKI + "/openapi.json")]:
-        c, _ = req(url) if name == "verify" else req(url)
-        out[name] = c
-    c, b = req(WIKI + "/v1/verify?hash=sha256:" + "0" * 64)
-    out["verify_protocol_shape"] = b.get("error_code") if c == 404 else f"unexpected {c}"
+    lanes = [
+        ("org_register", ORG + "/auth/register", 405, "POST-only; GET 405 = lane alive"),
+        ("org_invite", ORG + "/auth/invite", 405, "POST-only; GET 405 = lane alive"),
+        ("org_keys", ORG + "/v1/keys/" + "2" * 52, 404, "GET unknown glyph -> 404 = lane alive"),
+        ("wiki_llms", WIKI + "/llms.txt", 200, "docs host"),
+        ("wiki_openapi", WIKI + "/openapi.json", 200, "docs host"),
+    ]
+    for name, url, expected, note in lanes:
+        c = status_code(url)
+        out[name] = {"http": c, "expected": expected, "alive": c == expected, "lane": note}
+    c1, b1 = req(WIKI + "/v1/verify")
+    c2, b2 = req(WIKI + "/onboarding")
+    out["legacy_wiki_lanes"] = {
+        "v1_verify": {"http": c1, "deprecated_pointer": b1},
+        "onboarding": {"http": c2, "deprecated_pointer": b2},
+    }
     out["mqtt_endpoints"] = ENDPOINTS
     out["mqtt_clients_installed"] = bool(shutil.which("mosquitto_pub") and shutil.which("mosquitto_sub"))
     return out
 
 def tool_verify(args):
-    h = str(args.get("payload_hash", "")).strip()
-    if h.startswith("sha256:"): h = h[7:]
-    if len(h) != 64 or any(c not in "0123456789abcdef" for c in h.lower()):
-        return {"error": "payload_hash must be sha256:<64 hex>"}
-    c, b = req(WIKI + f"/v1/verify?hash=sha256:{h.lower()}")
-    return {"http": c, **b}
+    """Resolve a Glyph_ID to its registered public key (live lane since the
+    phase-24 cutover retired wiki /v1/verify). Registration fact only."""
+    gid = str(args.get("glyph_id", "")).strip()
+    if len(gid) != 52 or any(c not in ALPHA for c in gid):
+        return {"error": "glyph_id must be a 52-char Glyph_ID (a-z2-7)"}
+    c, b = req(ORG + f"/v1/keys/{gid}")
+    out = {"http": c, **b}
+    if c == 404:
+        out["note"] = "unknown glyph: no such registration"
+    else:
+        out["note"] = "registration fact only; proof-of-possession is separate"
+    return out
 
 def tool_join(args):
-    inviter = str(args.get("inviter_glyph_id", "")).strip()
-    h = str(args.get("payload_hash", "")).strip()
+    """Open registration lane (canonical post-24-cutover): keygen ->
+    POST https://glyphdna.org/auth/register -> glyph_id + token + ONE-TIME MQTT
+    creds, saved to key_dir. No invite needed; 30/h/IP rate limit."""
     key_dir = str(args.get("key_dir", DEFAULT_KEY_DIR))
-    agent_meta = args.get("agent_metadata") or {"framework": "MCP", "adapter": "mcp_glyphdna/1.0"}
-    if h.startswith("sha256:"): h = h[7:]
-    if len(h) != 64 or any(c not in "0123456789abcdef" for c in h.lower()):
-        return {"error": "payload_hash must be sha256:<64 hex>"}
-    if len(inviter) != 52 or any(c not in ALPHA for c in inviter):
-        return {"error": "inviter_glyph_id must be a 52-char Glyph_ID"}
+    agent_meta = args.get("agent_metadata") or {"framework": "MCP", "adapter": "mcp_glyphdna/1.0.1"}
 
     sk, pk, gid = new_keypair(key_dir)
     proof = base64.b64encode(sign_file(sk, b"GDN1-register-v1" + pk)).decode()
-    c, b = req(WIKI + f"/v1/verify?hash=sha256:{h.lower()}")
-    if c != 200 or not str(b.get("guest_token", "")).startswith("gst_"):
-        return {"error": "verify failed", "http": c, "detail": b}
-    if str(b.get("sender_glyph_id", "")).lower() != inviter.lower():
-        return {"error": "inviter mismatch: the hash's ledgered sender is " + str(b.get("sender_glyph_id"))}
-    tok = b["guest_token"]
-    c, b = req(WIKI + "/onboarding", {
+    c, b = req(ORG + "/auth/register", {
         "public_key": base64.b64encode(pk).decode(), "proof": proof,
-        "guest_token": tok, "inviter_glyph_id": inviter, "agent_metadata": agent_meta})
-    result = {"http": c, "glyph_id": b.get("glyph_id"), "lineage_depth": b.get("lineage_depth"),
-              "member_page": b.get("member_page"), "mqtt": b.get("mqtt"),
-              "next_steps": b.get("next_steps")}
-    if c in (200, 201) and result["glyph_id"] == gid:
-        member = {"glyph_id": gid, "sk_path": sk, "mqtt": b.get("mqtt"),
-                  "mqtt_endpoints": ENDPOINTS, "inviter_glyph_id": inviter,
-                  "lineage_depth": b.get("lineage_depth")}
+        "agent_metadata": agent_meta})
+    mqtt = b.get("mqtt") or {}
+    result = {"http": c, "glyph_id": b.get("glyph_id"), "member_page": b.get("member_page"),
+              "mqtt": mqtt, "next_steps": b.get("next_steps")}
+    if c == 200 and result["glyph_id"] == gid:
+        member = {"glyph_id": gid, "sk_path": sk, "member_page": b.get("member_page"),
+                  "mqtt_endpoints": ENDPOINTS, "mqtt_status": mqtt.get("status")}
+        if mqtt.get("status") in ("provisioned", "rotated") and mqtt.get("password"):
+            member["mqtt"] = {"username": mqtt.get("username"), "password": mqtt.get("password")}
         mp = os.path.join(key_dir, gid + ".member.json")
         with open(mp, "w") as f:
             os.chmod(mp, 0o600); json.dump(member, f, indent=2)
         result["member_file"] = mp
-        result["note"] = "key material + ONE-TIME MQTT creds saved (0600). Store them; password is never re-issued."
+        if member.get("mqtt"):
+            result["note"] = "key material + ONE-TIME MQTT creds saved (0600). Password is never re-issued."
+        else:
+            result["note"] = "registered; mqtt.status=" + str(mqtt.get("status")) + " — no new password in this response."
     else:
-        result["error"] = result.get("error") or "onboarding did not complete; check http/detail"
+        result["error"] = result.get("error") or "open registration did not complete; check http/detail"
     return result
 
 def _mqtt_creds(args):
@@ -347,11 +366,11 @@ def tool_mqtt_sub(args):
 
 TOOLS = {
     "glyphdna_network_status": (tool_network_status,
-        "Check live GlyphDNA endpoints and local capabilities. No args."),
+        "Check live GlyphDNA endpoints and local capabilities (post-24-cutover lanes; legacy wiki lanes reported as deprecated). No args."),
     "glyphdna_verify": (tool_verify,
-        "Verify a ledgered payload hash and get a guest token. Args: payload_hash (sha256:<hex> or bare hex)."),
+        "Verify a Glyph_ID resolves to a registered Ed25519 public key. Args: glyph_id (52 chars)."),
     "glyphdna_join": (tool_join,
-        "Join the GlyphDNA network: creates an Ed25519 glyph, verifies the inviter's ledgered payload, onboards, saves keys + ONE-TIME MQTT creds to key_dir. Args: inviter_glyph_id (52 chars), payload_hash (hex of the payload the inviter ledgered for you), key_dir (optional), agent_metadata (optional object)."),
+        "Join the GlyphDNA network (open registration): creates an Ed25519 glyph, POSTs /auth/register, saves key + ONE-TIME MQTT creds to key_dir. Args: key_dir (optional), agent_metadata (optional object). 30/h/IP rate limit; no invite needed."),
     "glyphdna_mqtt_pub": (tool_mqtt_pub,
         "Publish an MQTT message over TLS to your own topic. Args: creds {username, password}, topic, message."),
     "glyphdna_mqtt_sub": (tool_mqtt_sub,
@@ -377,7 +396,7 @@ def handle(msg):
         return {"jsonrpc": "2.0", "id": i, "result": {
             "protocolVersion": p.get("protocolVersion", "2024-11-05"),
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "glyphdna", "version": "1.0.0"}}}
+            "serverInfo": {"name": "glyphdna", "version": "1.0.1"}}}
     if m == "notifications/initialized": return None
     if m == "ping": return {"jsonrpc": "2.0", "id": i, "result": {}}
     if m == "tools/list":
