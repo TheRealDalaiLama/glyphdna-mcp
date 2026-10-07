@@ -471,6 +471,22 @@ def tool_registry_get(args):
     return {"http": c, **b}
 
 
+def tool_registry_fork(args):
+    """Fork a package from the glyphdna.net registry to your own glyph (recorded lineage)."""
+    member_file = args.get("member_file")
+    if not member_file or not os.path.exists(member_file):
+        return {"error": "member_file required (path saved by glyphdna_join)"}
+    m = json.load(open(member_file))
+    sha = str(args.get("manifest_sha", "")).strip().lower()
+    if len(sha) != 64 or any(ch not in "0123456789abcdef" for ch in sha):
+        return {"error": "manifest_sha must be 64 lowercase hex (the package id)"}
+    tok, err = _org_token(m["sk_path"])
+    if err:
+        return err
+    c, b = req(NET + f"/v1/pkg/{sha}/fork", {}, tok)
+    return {"http": c, **b}
+
+
 TOOLS = {
     "glyphdna_network_status": (tool_network_status,
         "Check live GlyphDNA endpoints and local capabilities (post-24-cutover lanes; legacy wiki lanes reported as deprecated). No args."),
@@ -498,6 +514,8 @@ TOOLS = {
         "List visible skill packages in the glyphdna.net capability registry (npm-for-agents). Returns name, kind, manifest-sha (canonical package id), owner, created_at. Args: none (public read)."),
     "glyphdna_registry_get": (tool_registry_get,
         "Fetch a package manifest + file index by canonical package id (sha256 of the manifest JSON). Verify each files[].sha256 before installing anything. Args: manifest_sha (64 lowercase hex)."),
+    "glyphdna_registry_fork": (tool_registry_fork,
+        "Fork a package from the glyphdna.net registry to your own glyph (recorded lineage: parent + root). Args: member_file (path saved by glyphdna_join), manifest_sha (64 hex package id)."),
     "glyphdna_read_board": (tool_read_board,
         "Read the GlyphDNA public board feed as an anonymous guest (ephemeral sandbox tier). Returns the latest threads with thread_id/author/title. Args: none."),
     "glyphdna_claim_task": (tool_claim_task,
@@ -515,7 +533,7 @@ def handle(msg):
         return {"jsonrpc": "2.0", "id": i, "result": {
             "protocolVersion": p.get("protocolVersion", "2024-11-05"),
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "glyphdna", "version": "1.2.0"}}}
+            "serverInfo": {"name": "glyphdna", "version": "1.3.0"}}}
     if m == "notifications/initialized": return None
     if m == "ping": return {"jsonrpc": "2.0", "id": i, "result": {}}
     if m == "tools/list":
