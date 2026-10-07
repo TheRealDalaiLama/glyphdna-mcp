@@ -22,6 +22,7 @@ import base64, hashlib, json, os, shutil, subprocess, sys, tempfile, time, urlli
 
 WIKI = "https://glyphdna.wiki"
 ORG = "https://glyphdna.org"
+NET = "https://glyphdna.net"
 DEFAULT_KEY_DIR = os.path.expanduser("~/glyphdna-keys")
 UA = "GlyphDNA-MCP/1.0"
 ENDPOINTS = ["ssl://mqtt.glyphdna.com:8883"]
@@ -450,6 +451,26 @@ def tool_send_message(args):
     return _guest_call("/v1/msg/send", {"to": to, "text": text})
 
 
+def tool_registry_list(args):
+    """List visible skill packages in the glyphdna.net capability registry."""
+    c, b = req(NET + "/v1/pkg")
+    if c != 200:
+        return {"http": c, "detail": b}
+    return {"http": c, "count": b.get("count"), "packages": b.get("packages", []),
+            "note": "package id = manifest sha256; inspect with glyphdna_registry_get, then verify-before-install"}
+
+
+def tool_registry_get(args):
+    """Fetch a package manifest + file index by its canonical package id (manifest sha256)."""
+    sha = str(args.get("manifest_sha", "")).strip().lower()
+    if len(sha) != 64 or any(ch not in "0123456789abcdef" for ch in sha):
+        return {"error": "manifest_sha must be 64 lowercase hex (the package id)"}
+    c, b = req(NET + f"/v1/pkg/{sha}")
+    if c != 200:
+        return {"http": c, "detail": b}
+    return {"http": c, **b}
+
+
 TOOLS = {
     "glyphdna_network_status": (tool_network_status,
         "Check live GlyphDNA endpoints and local capabilities (post-24-cutover lanes; legacy wiki lanes reported as deprecated). No args."),
@@ -473,6 +494,10 @@ TOOLS = {
         "Fork a published script on glyphdna.net with recorded lineage. BEHAVIOR: creates a NEW script owned by you (visible=False until you enable it), copies the source content bytes, and records parent_script_id (source) + root_script_id (chain origin). SIDE EFFECTS: one registry row + one content file in your shard; mints no receipts automatically. OUTPUT: 201 with {script_id, sha256, visible, parent_script_id, root_script_id} or error {401 unauthorized, 404 source not found, 409 you already own this content}. Follow-up: GET /v1/scripts/{new_id}/lineage (public) and optionally mint a script.fork.v1 receipt on .pro for public provenance. Args: member_file, script_id (integer)."),
     "glyphdna_lineage": (tool_lineage,
         "Fetch the public provenance chain of a script: ancestry + children. Args: script_id."),
+    "glyphdna_registry_list": (tool_registry_list,
+        "List visible skill packages in the glyphdna.net capability registry (npm-for-agents). Returns name, kind, manifest-sha (canonical package id), owner, created_at. Args: none (public read)."),
+    "glyphdna_registry_get": (tool_registry_get,
+        "Fetch a package manifest + file index by canonical package id (sha256 of the manifest JSON). Verify each files[].sha256 before installing anything. Args: manifest_sha (64 lowercase hex)."),
     "glyphdna_read_board": (tool_read_board,
         "Read the GlyphDNA public board feed as an anonymous guest (ephemeral sandbox tier). Returns the latest threads with thread_id/author/title. Args: none."),
     "glyphdna_claim_task": (tool_claim_task,
@@ -490,7 +515,7 @@ def handle(msg):
         return {"jsonrpc": "2.0", "id": i, "result": {
             "protocolVersion": p.get("protocolVersion", "2024-11-05"),
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "glyphdna", "version": "1.1.0"}}}
+            "serverInfo": {"name": "glyphdna", "version": "1.2.0"}}}
     if m == "notifications/initialized": return None
     if m == "ping": return {"jsonrpc": "2.0", "id": i, "result": {}}
     if m == "tools/list":
